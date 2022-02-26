@@ -1,0 +1,151 @@
+---
+title: "Data Exploration Project"
+author: "Ryan Ogi"
+date: "2/21/2022"
+output: html_document
+---
+
+## Loading in Libraries
+Libraries used to complete our analysis.
+```{r setup, include=TRUE}
+library(tidyverse)
+library(dplyr)
+library(jtools)
+library(car)
+library(vtable)
+library(purrr)
+library(readxl)
+library(lubridate)
+```
+
+## Cleaning the Dataset
+Loading in trends_up_to_ data using list.files.
+```{r setup2, include = TRUE}
+trendsList <- list.files(path = "../DataFiles/", pattern = 'trends_up_to_', full.names = TRUE) %>% lapply(read_csv) %>% bind_rows  
+```
+
+
+Loading in Scorecard + Elements data and id_name data without an absolute file path.
+```{r cars}
+scorecardElements <- read.csv("../DataFiles/Most+Recent+Cohorts+(Scorecard+Elements).csv", header=TRUE)
+idName <- read.csv('../DataFiles/id_name_link.csv')
+```
+
+Standardizing the Google Trends data.
+```{r cars2, include = TRUE}
+data <- trendsList %>%
+  group_by(schname, keyword) %>%
+  mutate(index_std = (index - mean(index,na.rm = TRUE))/sd(index, na.rm = TRUE))
+```
+
+Removing duplicated universities that share the same schname.
+```{r cars3, include = TRUE}
+idName <- idName %>%
+  group_by(schname) %>%
+  mutate(N = n()) %>%
+  filter(N == 1)
+```
+
+Change column names in the scorecard to lower case. This will help in uniforming our column names. 
+```{r cars4, include = TRUE}
+names(scorecardElements) <- tolower(names(scorecardElements))
+```
+
+Change the earning variable into numeric variable for data analytics later.
+```{r cars5, include = TRUE}
+scorecardElements$md_earn_wne_p10.reported.earnings = as.numeric(as.character(scorecardElements$md_earn_wne_p10.reported.earnings))
+```
+
+Merge idName, trendList, and scorecardElements into id_trends and trends_scorecardElements using left_join. This puts our datasets into one file. 
+```{r cars6, include = TRUE}
+idTrends <- idName %>% left_join(data, by = "schname")
+
+trends_scorecardElements <- idTrends %>% 
+left_join(scorecardElements, by = c("unitid" = "unitid", "opeid" = "opeid"))
+```
+
+Filtering our data to show colleges that offer bachelor programs. preddeg == 3 means the college predominant degree awarded is a bachelors degree.   
+```{r cars7, include = TRUE}
+bachelor_trends_scorecardElements <- trends_scorecardElements %>% 
+  filter (preddeg == 3, na.rm = TRUE)
+```
+
+# Performing the Analysis 
+
+Our research question is, "Among colleges that predominantly grant bachelor’s degrees, did the release of the Scorecard shift student interest to  high-earnings colleges relative to low-earnings ones?" To find this, first we will need to consider what is a median of our data. According to the US Bureau of labor statistics in 2015, the weekly median earnings of those with a bachelor's degree over the age of 25, is $1,137. If we multiply this number by 52 weeks, the yearly median salary is $59,124 of those with a bachelor degree who are over the age of 25. 
+
+
+Using the information above from the US Bureau of Labor Statistics, we can now determine that colleges who have above $59,124 is considered "high-earnings" while colleges below the $59,124 is considered "low-earnings". Our dummy variables will have 0 for "low-earning" and 1 is "high-earning" colleges. 
+
+Our dummy variables will have 0 for "low-earning" and 1 is "high-earning" colleges. 
+```{r cars20, include = TRUE}
+bachelor_trends_scorecardElements$medianEarnings <-
+  ifelse(bachelor_trends_scorecardElements$md_earn_wne_p10.reported.earnings >= 59124 ,"1", "0")
+```
+
+Remove unnecessary columns in our data by selecting relevant columns for our analysis. 
+```{r cars8, include = TRUE}
+bachelor_trends_scorecardElements <- bachelor_trends_scorecardElements %>% 
+  select(unitid, opeid, schname, keyword, monthorweek, preddeg, md_earn_wne_p10.reported.earnings, medianEarnings, index_std)
+```
+
+Change our data from one row per week to college by month. We use this to level our data set. 
+```{r cars9, include = TRUE}
+bachelor_by_month <- bachelor_trends_scorecardElements %>%
+mutate(date = as.Date(str_sub(monthorweek, 1, 10))) %>%
+group_by(schname, keyword) %>%
+mutate(index_std = (index_std - mean(index_std, na.rm = TRUE))/sd(index_std, na.rm = TRUE)) %>%
+group_by(month = floor_date(date, "month"), unitid, opeid, md_earn_wne_p10.reported.earnings, medianEarnings) %>% summarize(index_std = mean(index_std, na.rm = TRUE))
+```
+
+Remove the N/A in our data set.
+```{r cars10, include = TRUE}
+my_cleaned_data <- drop_na(bachelor_by_month)
+```
+
+## Difference in Difference Regression Model.
+
+Doing a difference in difference model will helps us compare our data to show how the introduction of the college scorecard really affected our results. We will see later that it did affect our results by a slight increase.   
+
+First we want to add a logical dummy variable to data. We'll call this dummy variable treated. The treated variable will change from TRUE to FALSE based on whether the median earnings of students working and not enrolled 10 years after entry reported earnings is above or below $59,124. TRUE will occur if the reported earnings is greater than $59,124. FALSE will occur if the median reported earnings is less than $59,124.
+
+We added another logical dummy variable called "post_treatment" in order to see if the date was equal or after 2015-09-12. This is date was when the scorecard was released. 
+```{r cars11, include = TRUE}
+my_cleaned_data <- my_cleaned_data %>% 
+mutate(treated = md_earn_wne_p10.reported.earnings >= 59124, post_treatment = month >= as.Date("2015-09-12"))
+```
+
+For our difference in difference regression model. Were trying to see the impact the Google trends data based on whether the college scorecard increased the amount of searches for respective college keywords. We can see this using our regression. 
+```{r cars12, include = TRUE}
+DID <- lm(index_std ~ treated * post_treatment, data = my_cleaned_data)
+export_summs(DID, digits = 2)
+```
+
+According to our regression, the "high-earning" colleges were 3 percent more likely to increase student interest according to Google searches for keywords related to the respective college. 
+
+## Graph of Google Trends Index Searches by Month
+
+Before we plot our data, we want to plot only one value per month. To do this, we summarize the index_std by taking the mean(average) of the index standard deviation (index_std) for each month. Then we plot the data accordingly. 
+
+Our orange line is the "low-earning" colleges and the cyan line represents the "high-earning" colleges. 
+
+Our black line located on 2015-09-12 shows that anything before the black line was data before the college scorecard was introduced. Data on the right represents the affects after the scorecard was introduced.
+
+According to our graph, there have been slight increases and decreases throughout the year before and after the scorecard was released. Overall the trend seemed to have been the same regardless of whether the scorecard was introduced or not. This could be influenced as students research colleges during specific times of the year (ex. college admissions deadlines, etc.). Though, around the black line on our graph, there was a big increase right before the scorecard was released. Then, after the 2015-09-12 date, the trend began to return to normal. We can infer "low-earning" and "high-earning" colleges seems relatively even throughout this time frame. 
+```{r cars13, include = TRUE}
+my_cleaned_data <- my_cleaned_data %>% 
+  group_by(medianEarnings,month) %>% 
+  summarize(index_std = mean(index_std, na.rm = TRUE))
+  
+graph <- my_cleaned_data %>% 
+  ggplot(aes(x=month, y=index_std, group = medianEarnings, color = medianEarnings)) + labs(title = "Google Trends data over months.", subtitle = "0 = orange line 'low-earnings', 1 = cyan line, 'high-earnings'") + scale_fill_discrete(name="Experimental\nCondition") + geom_line() + geom_vline(xintercept = as.Date("2015-09-12"))
+
+graph + scale_colour_discrete(name="Median Earnings")
+```
+
+
+
+
+## Conclusion
+
+Using our graph, we can see that the "low-earning" and "high-earning" colleges seemed relatively even throughout this time frame for colleges that predominantly grant bachelor’s degrees. Although, "high-earning" colleges have an ever so slight edge of "low-earning" colleges. The trend of our graph had a slight spike right before the scorecard was released, but trends returned back to normal after. 
